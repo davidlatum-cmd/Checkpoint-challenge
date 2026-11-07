@@ -1,0 +1,371 @@
+
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#101820">
+<title>Checkpoint Challenge</title>
+<style>
+:root {
+  color-scheme: dark;
+  font-family: Arial, sans-serif;
+  background: #101820;
+  color: #fff;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 18px;
+  max-width: 650px;
+  margin-inline: auto;
+}
+h1 { font-size: 27px; margin-bottom: 5px; }
+.sub { color: #aab5c0; margin-top: 0; }
+.card {
+  background: #1b2935;
+  padding: 17px;
+  border-radius: 15px;
+  margin: 15px 0;
+}
+label { display:block; color:#b9c6d1; margin:12px 0 5px; }
+input, select, button {
+  width: 100%;
+  padding: 14px;
+  border-radius: 9px;
+  border: 1px solid #40515e;
+  background: #101820;
+  color: white;
+  font-size: 16px;
+}
+button {
+  background: #168b67;
+  border: 0;
+  font-weight: bold;
+  margin-top: 12px;
+  cursor: pointer;
+}
+button.secondary { background:#34495a; }
+button.danger { background:#a33c3c; }
+button:disabled { opacity:.4; }
+.grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.big {
+  font-size: 34px;
+  font-weight: bold;
+  text-align:center;
+  margin: 15px 0;
+}
+.feedback { text-align:center; font-size:26px; font-weight:bold; }
+.small { color:#aab5c0; font-size:13px; }
+.hidden { display:none; }
+.status { color:#9fd9c4; white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<h1>Checkpoint Challenge</h1>
+<p class="sub">Fiets zonder navigatie. Vertrouw op je richtingsgevoel.</p>
+
+<section id="setup" class="card">
+  <h2>1. Stel je route in</h2>
+  <label>Start latitude</label>
+  <input id="startLat" type="number" step="any" placeholder="52.0000">
+  <label>Start longitude</label>
+  <input id="startLon" type="number" step="any" placeholder="5.0000">
+  <button class="secondary" onclick="useLocation()">Gebruik mijn huidige locatie als start</button>
+
+  <label>Finish latitude</label>
+  <input id="endLat" type="number" step="any" placeholder="52.1000">
+  <label>Finish longitude</label>
+  <input id="endLon" type="number" step="any" placeholder="5.1000">
+
+  <label>Checkpointafstand</label>
+  <select id="interval">
+    <option value="1">Iedere 1 kilometer</option>
+    <option value="2">Iedere 2 kilometer</option>
+    <option value="5" selected>Iedere 5 kilometer</option>
+  </select>
+
+  <label>Fietsprofiel</label>
+  <select id="profile">
+    <option value="trekking">Normale fietsroute</option>
+    <option value="fastbike">Snellere fietsroute</option>
+  </select>
+
+  <button onclick="makeRoute()">Bereken geheime fietsroute</button>
+  <p id="setupStatus" class="status"></p>
+</section>
+
+<section id="ready" class="card hidden">
+  <h2>Route klaar!</h2>
+  <p id="routeInfo"></p>
+  <p class="small">De route en het aantal checkpoints zijn verborgen tijdens de rit.</p>
+  <button onclick="startRide()">START CHALLENGE</button>
+</section>
+
+<section id="ride" class="hidden">
+  <div class="card">
+    <p class="small">CHECKPOINT CHALLENGE</p>
+    <div class="big" id="checkpointNumber">LOCK</div>
+    <p class="small" style="text-align:center">Denk je dat je bij een checkpoint bent?</p>
+    <button style="font-size:25px;padding:23px" onclick="lockPosition()">LOCK</button>
+    <div id="feedback" class="feedback"></div>
+    <p id="rideStatus" class="small" style="text-align:center"></p>
+  </div>
+  <div class="card">
+    <button class="secondary" onclick="showCamera()">CAMERAMODUS</button>
+    <button class="danger" onclick="finishRide()">FINISH / ROUTE ONTHULLEN</button>
+  </div>
+</section>
+
+<section id="camera" class="card hidden">
+  <h2>Cameramodus</h2>
+  <p class="small">Toon dit scherm aan de camera, niet aan de fietser.</p>
+  <div class="big" id="cameraDistance">-- m</div>
+  <div class="feedback" id="cameraFeedback"></div>
+  <button class="secondary" onclick="hideCamera()">Terug</button>
+</section>
+
+<section id="results" class="card hidden">
+  <h2>Resultaat</h2>
+  <div class="big" id="average">--</div>
+  <p class="small">Gemiddelde afwijking van de checkpoints</p>
+  <div id="resultList"></div>
+  <button onclick="downloadGPX()">DOWNLOAD IDEALE ROUTE (GPX)</button>
+  <button class="secondary" onclick="downloadCSV()">DOWNLOAD CHECKPOINTRESULTATEN (CSV)</button>
+  <button class="secondary" onclick="downloadGuessesGPX()">DOWNLOAD MIJN LOCK-POSITIES (GPX)</button>
+</section>
+
+<script>
+let route = [];
+let checkpoints = [];
+let locks = [];
+let nextCheckpoint = 0;
+let lastDistance = null;
+let rideStarted = false;
+let currentDistance = null;
+let currentFeedback = "";
+
+const $ = id => document.getElementById(id);
+
+function show(id) { $(id).classList.remove("hidden"); }
+function hide(id) { $(id).classList.add("hidden"); }
+
+function number(id) {
+  const value = Number($(id).value);
+  if (!Number.isFinite(value)) throw new Error("Vul alle coördinaten in.");
+  return value;
+}
+
+function haversine(a,b) {
+  const rad = x => x * Math.PI / 180;
+  const R = 6371000;
+  const dLat = rad(b[1]-a[1]);
+  const dLon = rad(b[0]-a[0]);
+  const x = Math.sin(dLat/2)**2 +
+    Math.cos(rad(a[1])) * Math.cos(rad(b[1])) *
+    Math.sin(dLon/2)**2;
+  return 2*R*Math.atan2(Math.sqrt(x),Math.sqrt(1-x));
+}
+
+function interpolate(a,b,t) {
+  return [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t];
+}
+
+function makeCheckpoints(coords, intervalKm) {
+  const cumulative = [0];
+  for(let i=1;i<coords.length;i++)
+    cumulative.push(cumulative[i-1]+haversine(coords[i-1],coords[i]));
+
+  const total = cumulative[cumulative.length-1];
+  const result = [];
+  for(let target=intervalKm*1000; target<total-100; target+=intervalKm*1000) {
+    let i=1;
+    while(i<cumulative.length && cumulative[i]<target) i++;
+    if(i>=coords.length) break;
+    const segment = cumulative[i]-cumulative[i-1];
+    const t = segment ? (target-cumulative[i-1])/segment : 0;
+    result.push({
+      distance: target,
+      point: interpolate(coords[i-1],coords[i],t)
+    });
+  }
+  return result;
+}
+
+async function makeRoute() {
+  try {
+    $("setupStatus").textContent = "Fietsroute wordt berekend...";
+    const slat=number("startLat"), slon=number("startLon");
+    const elat=number("endLat"), elon=number("endLon");
+    if(Math.abs(slat)>90 || Math.abs(elat)>90 ||
+       Math.abs(slon)>180 || Math.abs(elon)>180)
+      throw new Error("Coördinaten zijn ongeldig.");
+
+    const profile=$("profile").value;
+    const url="https://brouter.de/brouter?lonlats="+
+      encodeURIComponent(`${slon},${slat}|${elon},${elat}`)+
+      "&profile="+profile+"&alternativeidx=0&format=geojson";
+
+    const response=await fetch(url);
+    if(!response.ok) throw new Error("Routeprovider niet bereikbaar.");
+    const data=await response.json();
+    const coords=data.features?.[0]?.geometry?.coordinates;
+    if(!coords || coords.length<2) throw new Error("Geen fietsroute gevonden.");
+
+    route=coords;
+    checkpoints=makeCheckpoints(route,Number($("interval").value));
+    locks=[];
+    nextCheckpoint=0;
+    lastDistance=null;
+
+    const km=route.reduce((sum,p,i)=>i?sum+haversine(route[i-1],p):0,0)/1000;
+    $("routeInfo").textContent=
+      "Afstand: "+km.toFixed(1)+" km. De route is berekend en verborgen.";
+    $("setupStatus").textContent="Route succesvol berekend.";
+    hide("setup");
+    show("ready");
+  } catch(e) {
+    $("setupStatus").textContent="Fout: "+e.message;
+  }
+}
+
+function useLocation() {
+  if(!navigator.geolocation) return alert("GPS niet beschikbaar.");
+  navigator.geolocation.getCurrentPosition(pos=>{
+    $("startLat").value=pos.coords.latitude.toFixed(6);
+    $("startLon").value=pos.coords.longitude.toFixed(6);
+  },()=>alert("Locatie kon niet worden opgehaald."),{enableHighAccuracy:true});
+}
+
+function startRide() {
+  rideStarted=true;
+  hide("ready");
+  show("ride");
+  updateCheckpoint();
+}
+
+function updateCheckpoint() {
+  $("checkpointNumber").textContent="CHECKPOINT "+(nextCheckpoint+1);
+  $("feedback").textContent="";
+  $("rideStatus").textContent="Druk op LOCK wanneer je denkt dat je er bent.";
+}
+
+function classify(meters) {
+  if(meters<=100) return "HEET";
+  if(meters<=500) return "LAUW";
+  return "KOUD";
+}
+
+function lockPosition() {
+  if(nextCheckpoint>=checkpoints.length) {
+    $("rideStatus").textContent="Alle checkpoints zijn gelockt. Fiets naar de finish!";
+    return;
+  }
+  if(!navigator.geolocation) return alert("GPS niet beschikbaar.");
+
+  $("rideStatus").textContent="GPS-locatie bepalen...";
+  navigator.geolocation.getCurrentPosition(pos=>{
+    const guess=[pos.coords.longitude,pos.coords.latitude];
+    const target=checkpoints[nextCheckpoint].point;
+    const meters=haversine(guess,target);
+    const feedback=classify(meters);
+
+    locks.push({
+      number:nextCheckpoint+1,
+      guess,
+      target,
+      meters,
+      feedback,
+      accuracy:pos.coords.accuracy,
+      timestamp:new Date().toISOString()
+    });
+    lastDistance=meters;
+    currentDistance=meters;
+    currentFeedback=feedback;
+
+    $("feedback").textContent=feedback;
+    $("rideStatus").textContent="Checkpoint vastgelegd.";
+    nextCheckpoint++;
+
+    if(nextCheckpoint<checkpoints.length) {
+      setTimeout(updateCheckpoint,1800);
+    } else {
+      $("rideStatus").textContent="Alle checkpoints gelockt. Fiets naar de finish!";
+    }
+  },err=>{
+    $("rideStatus").textContent="GPS-fout: "+err.message;
+  },{enableHighAccuracy:true,timeout:20000,maximumAge:0});
+}
+
+function showCamera() {
+  if(currentDistance===null) {
+    alert("Er is nog geen checkpoint gelockt.");
+    return;
+  }
+  $("cameraDistance").textContent=Math.round(currentDistance)+" meter";
+  $("cameraFeedback").textContent=currentFeedback;
+  hide("ride");
+  show("camera");
+}
+function hideCamera() { hide("camera"); show("ride"); }
+
+function finishRide() {
+  if(!confirm("Weet je zeker dat je de route wilt onthullen?")) return;
+  hide("ride");
+  hide("camera");
+  show("results");
+  const avg=locks.length?
+    locks.reduce((s,x)=>s+x.meters,0)/locks.length:0;
+  $("average").textContent=locks.length?Math.round(avg)+" m":"Geen metingen";
+  $("resultList").innerHTML="";
+  locks.forEach(x=>{
+    const div=document.createElement("p");
+    div.textContent="Checkpoint "+x.number+": "+Math.round(x.meters)+
+      " m — "+x.feedback+" (GPS-nauwkeurigheid ±"+
+      Math.round(x.accuracy)+" m)";
+    $("resultList").appendChild(div);
+  });
+}
+
+function downloadFile(name,content,type) {
+  const blob=new Blob([content],{type});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a");
+  a.href=url;
+  a.download=name;
+  a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+
+function downloadGPX() {
+  const points=route.map(p=>
+    `<trkpt lat="${p[1]}" lon="${p[0]}"></trkpt>`).join("");
+  const xml=`<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="Checkpoint Challenge"
+xmlns="http://www.topografix.com/GPX/1/1">
+<trk><name>Ideale fietsroute</name><trkseg>${points}</trkseg></trk>
+</gpx>`;
+  downloadFile("ideale-route.gpx",xml,"application/gpx+xml");
+}
+
+function downloadGuessesGPX() {
+  const points=locks.map(x=>
+    `<wpt lat="${x.guess[1]}" lon="${x.guess[0]}"><name>Checkpoint ${x.number} lock</name></wpt>`
+  ).join("");
+  const xml=`<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="Checkpoint Challenge"
+xmlns="http://www.topografix.com/GPX/1/1">${points}</gpx>`;
+  downloadFile("mijn-lock-posities.gpx",xml,"application/gpx+xml");
+}
+
+function downloadCSV() {
+  const rows=[["Checkpoint","Afwijking_m","Feedback","GPS_nauwkeurigheid_m","Tijd"]];
+  locks.forEach(x=>rows.push([
+    x.number,x.meters.toFixed(1),x.feedback,x.accuracy.toFixed(1),x.timestamp
+  ]));
+  const csv=rows.map(r=>r.map(v=>'"'+String(v).replaceAll('"','""')+'"').join(";")).join("\n");
+  downloadFile("checkpoint-resultaten.csv",csv,"text/csv;charset=utf-8");
+}
+</script>
+</body>
+</html>
