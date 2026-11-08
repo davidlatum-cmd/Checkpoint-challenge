@@ -82,6 +82,7 @@ footer{font-size:12px;color:var(--muted);text-align:center;margin-top:20px}
       <div class="hintEmoji" id="hintEmoji">⏳</div>
       <div class="hintText" id="hintText"></div>
       <button class="secondary hidden" id="hintRetry">Hint opnieuw proberen</button>
+      <button class="secondary hidden" id="hintSkip">Zonder hint verder</button>
       <p class="small" style="margin-bottom:0">Geen exacte locatie. Geen route. Geen afstand.</p>
     </div>
     <button class="secondary" id="cameraToggle">Camera-/makersmodus: UIT</button>
@@ -243,7 +244,7 @@ $("lockButton").onclick=()=>{
  paintFeedback(label,bd);updateProgress();showNextHint();saveState();
 };
 /* ---- Hints via OpenStreetMap (Overpass) ---- */
-const ENDPOINTS=["https://overpass-api.de/api/interpreter","https://overpass.kumi.systems/api/interpreter"];
+const ENDPOINTS=["https://overpass-api.de/api/interpreter","https://overpass.kumi.systems/api/interpreter","https://overpass.private.coffee/api/interpreter"];
 const CATS={
  supermarket:{e:"🛒",p:["in de buurt van een supermarkt","bij een supermarkt"]},
  church:{e:"⛪",p:["in de buurt van een kerk","bij een kerk"]},
@@ -282,7 +283,7 @@ const RULES=[
 ];
 function overpassQuery(p){
  const a=(r)=>`(around:${r},${p.lat},${p.lon})`;
- return `[out:json][timeout:20];(
+ return `[out:json][timeout:10];(
 nwr${a(150)}["shop"="supermarket"];
 nwr${a(150)}["amenity"="place_of_worship"];
 way${a(80)}["bridge"~"^(yes|viaduct|movable|boardwalk|aqueduct)$"];
@@ -307,16 +308,20 @@ function extractCandidates(elements){
  return Object.values(found);
 }
 async function fetchCandidates(p){
- const body="data="+encodeURIComponent(overpassQuery(p));let lastErr;
- for(const url of ENDPOINTS){
-  const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),25000);
+ const body="data="+encodeURIComponent(overpassQuery(p));
+ const one=async url=>{
+  const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),12000);
   try{
    const r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body,signal:ctl.signal});
    if(!r.ok)throw new Error("HTTP "+r.status);
-   const data=await r.json();return extractCandidates(data.elements||[]);
-  }catch(e){lastErr=e;}finally{clearTimeout(timer);}
- }
- throw lastErr||new Error("Overpass-fout");
+   const data=await r.json();
+   if(!Array.isArray(data.elements)||/runtime error|timed out|out of memory/i.test(data.remark||""))throw new Error("server overbelast");
+   return extractCandidates(data.elements);
+  }catch(e){throw new Error((e.name==="AbortError"?"time-out":e.message)+" ("+new URL(url).hostname+")");}
+  finally{clearTimeout(timer);}
+ };
+ try{return await Promise.any(ENDPOINTS.map(one));}
+ catch(e){throw new Error(e.errors?e.errors.map(x=>x.message).join("; "):e.message);}
 }
 function loadCandidates(i){
  const cp=checkpoints[i];
@@ -326,7 +331,7 @@ function loadCandidates(i){
  return hintPromises[i];
 }
 async function prefetchHints(){
- const run=runId;
+ const run=runId;await sleep(4000);
  for(let i=0;i<checkpoints.length;i++){
   if(run!==runId||!active)return;
   const cp=checkpoints[i];if(!cp||cp.candidates||cp.done)continue;
@@ -343,9 +348,9 @@ function pickHint(cands){
  return {cat:c.cat,emoji:def.e,text};
 }
 function renderHint(h){
- $("hintRetry").classList.add("hidden");
+ $("hintRetry").classList.add("hidden");$("hintSkip").classList.add("hidden");
  if(h===null){$("hintEmoji").textContent="⏳";$("hintText").textContent="Hint wordt opgehaald…";return;}
- if(h.error){$("hintEmoji").textContent="📡";$("hintText").textContent="De hint kon niet worden opgehaald (geen verbinding?).";$("hintRetry").classList.remove("hidden");return;}
+ if(h.error){$("hintEmoji").textContent="📡";$("hintText").textContent="De hint kon niet worden opgehaald"+(h.msg?": "+h.msg:".");$("hintRetry").classList.remove("hidden");$("hintSkip").classList.remove("hidden");return;}
  $("hintEmoji").textContent=h.emoji;$("hintText").textContent=h.text;
 }
 async function showNextHint(){
@@ -360,9 +365,10 @@ async function showNextHint(){
  try{
   const cands=await loadCandidates(nextI);if(my!==hintToken)return;
   cp.hint=pickHint(cands);saveState();renderHint(cp.hint);
- }catch(e){if(my===hintToken)renderHint({error:true});}
+ }catch(e){if(my===hintToken)renderHint({error:true,msg:e&&e.message});}
 }
 $("hintRetry").onclick=()=>showNextHint();
+$("hintSkip").onclick=()=>{const i=checkpoints.findIndex(c=>!c.done);if(i<0)return;checkpoints[i].hint=pickHint([]);saveState();renderHint(checkpoints[i].hint);};
 $("cameraToggle").onclick=()=>{
  cameraMode=!cameraMode;$("cameraToggle").textContent="Camera-/makersmodus: "+(cameraMode?"AAN":"UIT");$("cameraInfo").classList.toggle("hidden",!cameraMode);
  const last=locks[locks.length-1];if(last)paintFeedback(last.feedback,last.deviation);saveState();
