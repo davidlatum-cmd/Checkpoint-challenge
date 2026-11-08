@@ -19,6 +19,7 @@ button.secondary{background:var(--panel2);color:var(--text);border:1px solid #4b
 .big{font-size:clamp(38px,12vw,66px);font-weight:950;letter-spacing:.03em;text-align:center;margin:12px 0 2px}.feedback{font-size:clamp(18px,5vw,24px);font-weight:900;text-align:center;margin:0 0 8px}.heat{color:var(--green)}.warm{color:var(--yellow)}.cold{color:var(--red)}
 .metric{background:#101b2b;border-radius:12px;padding:12px}.metric strong{display:block;font-size:22px}.metric span{color:var(--muted);font-size:12px}
 .hidden{display:none!important}.row{display:flex;gap:10px}.row>*{flex:1}.pill{display:inline-block;padding:5px 9px;background:#30445d;border-radius:99px;font-size:12px;color:#dbeafe}
+.hint{background:#101b2b;border:1px solid #4b6079;border-radius:14px;padding:14px;margin-top:12px;text-align:center}.hintHead{font-weight:900;font-size:15px;color:var(--green);letter-spacing:.03em}.hintSub{font-weight:800;margin:2px 0 10px}.hintLabel{font-size:12px;letter-spacing:.18em;color:var(--accent);font-weight:800}.hintEmoji{font-size:54px;line-height:1.2;margin:4px 0}.hintText{font-size:17px;font-weight:700;line-height:1.35}
 #routeSvg{width:100%;height:220px;background:#101b2b;border-radius:12px;margin-top:10px}
 table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:9px 5px;border-bottom:1px solid var(--line);text-align:left}th{color:var(--muted)}
 footer{font-size:12px;color:var(--muted);text-align:center;margin-top:20px}
@@ -74,6 +75,15 @@ footer{font-size:12px;color:var(--muted);text-align:center;margin-top:20px}
       <div class="feedback" id="feedbackDetail">—</div>
       <p class="small" style="text-align:center">Alleen de kleur wordt getoond. Geen richting of exacte afstand.</p>
     </div>
+    <div id="hintArea" class="hint hidden">
+      <div class="hintHead" id="hintHead"></div>
+      <div class="hintSub" id="hintSub"></div>
+      <div class="hintLabel">JOUW HINT</div>
+      <div class="hintEmoji" id="hintEmoji">⏳</div>
+      <div class="hintText" id="hintText"></div>
+      <button class="secondary hidden" id="hintRetry">Hint opnieuw proberen</button>
+      <p class="small" style="margin-bottom:0">Geen exacte locatie. Geen route. Geen afstand.</p>
+    </div>
     <button class="secondary" id="cameraToggle">Camera-/makersmodus: UIT</button>
     <div id="cameraInfo" class="status hidden" style="margin-top:8px">Makersmodus toont na iedere LOCK de exacte afwijking. Zet dit uit als de deelnemer meekijkt.</div>
     <button class="secondary" id="finishButton">Challenge beëindigen en route onthullen</button>
@@ -88,7 +98,7 @@ footer{font-size:12px;color:var(--muted);text-align:center;margin-top:20px}
     </div>
     <p class="small" id="finishSummary"></p>
     <h3>Resultaten</h3>
-    <div style="overflow-x:auto"><table><thead><tr><th>CP</th><th>Afstand op route</th><th>Afwijking</th><th>Feedback</th></tr></thead><tbody id="resultsBody"></tbody></table></div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Lock</th><th>Checkpoint op</th><th>Afwijking</th><th>Feedback</th></tr></thead><tbody id="resultsBody"></tbody></table></div>
     <h3 style="margin-top:18px">Ideale route (nu onthuld)</h3>
     <svg id="routeSvg" viewBox="0 0 600 220" role="img" aria-label="Kaartachtige weergave van de ideale route"></svg>
     <button id="downloadRoute" class="secondary">Download ideale route GPX</button>
@@ -98,20 +108,21 @@ footer{font-size:12px;color:var(--muted);text-align:center;margin-top:20px}
     <button id="downloadCsv" class="secondary">Download resultaten CSV</button>
     <button class="danger" id="newChallenge">Nieuwe challenge</button>
   </section>
-  <footer>Checkpoint Challenge · GPS-afstanden zijn indicaties en afhankelijk van GPS-nauwkeurigheid.</footer>
+  <footer>Checkpoint Challenge · GPS-afstanden zijn indicaties en afhankelijk van GPS-nauwkeurigheid. Hints: © OpenStreetMap-bijdragers.</footer>
 </main>
 <script>
 (() => {
 "use strict";
 const $ = id => document.getElementById(id);
 const STORAGE_KEY = "checkpointChallenge_v4";
-let route=[], cumulative=[], totalMeters=0, checkpoints=[], locks=[];
+let route=[], cumulative=[], totalMeters=0, checkpoints=[], locks=[], lastHintCat=null, runId=0, hintToken=0;
+const hintPromises={};const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 let currentPosition=null, watchId=null, active=false, finished=false, cameraMode=false, importedName="checkpoint-route";
 const sections=["setup","ready","active","finished"];
 function showSection(id){sections.forEach(s=>$(s).classList.toggle("hidden",s!==id));}
 function setStatus(message,kind=""){const el=$("setupStatus");el.textContent=message;el.className="status"+(kind?" "+kind:"");}
 function saveState(){
- const state={version:4,route,cumulative,totalMeters,checkpoints,locks,activity:$("activity").value,interval:$("interval").value,active,finished,cameraMode,importedName};
+ const state={version:5,lastHintCat,route,cumulative,totalMeters,checkpoints,locks,activity:$("activity").value,interval:$("interval").value,active,finished,cameraMode,importedName};
  try{localStorage.setItem(STORAGE_KEY,JSON.stringify(state));}catch(e){console.warn("Opslaan mislukt",e);}
 }
 function clearSaved(){localStorage.removeItem(STORAGE_KEY);}
@@ -132,7 +143,7 @@ function interpolateAt(distance){
 }
 function buildCheckpoints(){
  const step=Number($("interval").value)*1000;checkpoints=[];
- for(let d=step;d<totalMeters-100;d+=step)checkpoints.push({distance:d,point:interpolateAt(d)});
+ for(let d=step;d<totalMeters-100;d+=step)checkpoints.push({distance:d,point:interpolateAt(d),done:false});
  locks=[];
  $("routeKm").textContent=(totalMeters/1000).toFixed(1)+" km";$("checkpointCount").textContent=String(checkpoints.length);
 }
@@ -219,22 +230,146 @@ function beginActive(){
  active=true;finished=false;$("activityPill").textContent=$("activity").value==="cycling"?"FIETSEN":"HARDLOPEN";
  $("cameraToggle").textContent="Camera-/makersmodus: "+(cameraMode?"AAN":"UIT");$("cameraInfo").classList.toggle("hidden",!cameraMode);
  updateProgress();if(locks.length){const last=locks[locks.length-1];paintFeedback(last.feedback,last.deviation);}else $("feedbackArea").classList.add("hidden");
- $("lockButton").disabled=true;showSection("active");startGps();saveState();
+ $("lockButton").disabled=true;showSection("active");startGps();runId++;showNextHint();prefetchHints();saveState();
 }
-$("startChallenge").onclick=()=>{if(!checkpoints.length){alert("Er zijn geen checkpoints.");return;}locks=[];cameraMode=false;beginActive();};
+$("startChallenge").onclick=()=>{if(!checkpoints.length){alert("Er zijn geen checkpoints.");return;}locks=[];lastHintCat=null;checkpoints.forEach(c=>{c.done=false;delete c.hint;});cameraMode=false;beginActive();};
 $("lockButton").onclick=()=>{
- if(!active||!currentPosition||locks.length>=checkpoints.length)return;
- const index=locks.length,cp=checkpoints[index],deviation=haversine(currentPosition,cp.point),label=classify(deviation);
- locks.push({index:index+1,routeDistance:cp.distance,deviation,feedback:label,position:{lat:currentPosition.lat,lon:currentPosition.lon},accuracy:currentPosition.accuracy,time:new Date().toISOString()});
- paintFeedback(label,deviation);updateProgress();saveState();
+ if(!active||!currentPosition)return;
+ let best=-1,bd=Infinity;
+ checkpoints.forEach((cp,i)=>{if(cp.done)return;const d=haversine(currentPosition,cp.point);if(d<bd){bd=d;best=i;}});
+ if(best<0)return;
+ const cp=checkpoints[best],label=classify(bd);cp.done=true;
+ locks.push({index:locks.length+1,cpIndex:best,routeDistance:cp.distance,deviation:bd,feedback:label,position:{lat:currentPosition.lat,lon:currentPosition.lon},accuracy:currentPosition.accuracy,time:new Date().toISOString()});
+ paintFeedback(label,bd);updateProgress();showNextHint();saveState();
 };
+/* ---- Hints via OpenStreetMap (Overpass) ---- */
+const ENDPOINTS=["https://overpass-api.de/api/interpreter","https://overpass.kumi.systems/api/interpreter"];
+const CATS={
+ supermarket:{e:"🛒",p:["in de buurt van een supermarkt","bij een supermarkt"]},
+ church:{e:"⛪",p:["in de buurt van een kerk","bij een kerk"]},
+ mosque:{e:"🕌",p:["in de buurt van een moskee"]},
+ worship:{e:"🛐",p:["in de buurt van een gebedshuis"]},
+ bridge:{e:"🌉",p:["bij een brug","in de buurt van een brug"]},
+ rail:{e:"🚆",p:["langs een spoorlijn","vlak bij een spoorlijn"]},
+ forest:{e:"🌲",p:["bij een bos","in de buurt van bos"]},
+ water:{e:"💧",p:["in de buurt van een waterplas","bij open water"]},
+ sport:{e:"⚽",p:["bij een sportpark","in de buurt van een sportveld"]},
+ horeca:{e:"☕",p:["in de buurt van een horecagelegenheid","bij een café of restaurant"]},
+ school:{e:"🏫",p:["in de buurt van een school"]},
+ playground:{e:"🎠",p:["bij een speeltuin"]},
+ windmill:{e:"🌬️",p:["in de buurt van een molen"]},
+ fuel:{e:"⛽",p:["bij een tankstation"]},
+ park:{e:"🌳",p:["bij een park","in de buurt van een park"]},
+ station:{e:"🚉",p:["in de buurt van een treinstation"]}
+};
+const RULES=[
+ ["supermarket",t=>t.shop==="supermarket",t=>t.brand||t.name],
+ ["church",t=>t.amenity==="place_of_worship"&&t.religion==="christian"],
+ ["mosque",t=>t.amenity==="place_of_worship"&&t.religion==="muslim"],
+ ["worship",t=>t.amenity==="place_of_worship"&&t.religion!=="christian"&&t.religion!=="muslim"],
+ ["bridge",t=>/^(yes|viaduct|movable|boardwalk|aqueduct)$/.test(t.bridge||"")],
+ ["rail",t=>/^(rail|light_rail|tram)$/.test(t.railway||"")],
+ ["forest",t=>t.landuse==="forest"||t.natural==="wood"],
+ ["water",t=>t.natural==="water"],
+ ["sport",t=>/^(pitch|sports_centre|stadium|track)$/.test(t.leisure||"")],
+ ["horeca",t=>/^(cafe|restaurant|pub|bar|fast_food)$/.test(t.amenity||"")],
+ ["school",t=>t.amenity==="school"],
+ ["playground",t=>t.leisure==="playground"],
+ ["windmill",t=>t.man_made==="windmill"],
+ ["fuel",t=>t.amenity==="fuel",t=>t.brand],
+ ["park",t=>t.leisure==="park"],
+ ["station",t=>t.railway==="station"]
+];
+function overpassQuery(p){
+ const a=(r)=>`(around:${r},${p.lat},${p.lon})`;
+ return `[out:json][timeout:20];(
+nwr${a(150)}["shop"="supermarket"];
+nwr${a(150)}["amenity"="place_of_worship"];
+way${a(80)}["bridge"~"^(yes|viaduct|movable|boardwalk|aqueduct)$"];
+way${a(80)}["railway"~"^(rail|light_rail|tram)$"];
+nwr${a(100)}["landuse"="forest"];
+nwr${a(100)}["natural"~"^(wood|water)$"];
+nwr${a(150)}["leisure"~"^(pitch|sports_centre|stadium|track)$"];
+nwr${a(100)}["amenity"~"^(cafe|restaurant|pub|bar|fast_food)$"];
+nwr${a(120)}["amenity"="school"];
+nwr${a(100)}["leisure"~"^(playground|park)$"];
+nwr${a(150)}["man_made"="windmill"];
+nwr${a(120)}["amenity"="fuel"];
+nwr${a(150)}["railway"="station"];
+);out tags;`;
+}
+function extractCandidates(elements){
+ const found={};
+ elements.forEach(el=>{const t=el.tags||{};RULES.forEach(([cat,test,nameFn])=>{
+  if(!test(t))return;const name=nameFn?nameFn(t):null;
+  if(!found[cat])found[cat]={cat,name:name||null};else if(!found[cat].name&&name)found[cat].name=name;
+ });});
+ return Object.values(found);
+}
+async function fetchCandidates(p){
+ const body="data="+encodeURIComponent(overpassQuery(p));let lastErr;
+ for(const url of ENDPOINTS){
+  const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),25000);
+  try{
+   const r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body,signal:ctl.signal});
+   if(!r.ok)throw new Error("HTTP "+r.status);
+   const data=await r.json();return extractCandidates(data.elements||[]);
+  }catch(e){lastErr=e;}finally{clearTimeout(timer);}
+ }
+ throw lastErr||new Error("Overpass-fout");
+}
+function loadCandidates(i){
+ const cp=checkpoints[i];
+ if(cp.candidates)return Promise.resolve(cp.candidates);
+ if(hintPromises[i])return hintPromises[i];
+ hintPromises[i]=fetchCandidates(cp.point).then(c=>{cp.candidates=c;saveState();return c;}).finally(()=>{delete hintPromises[i];});
+ return hintPromises[i];
+}
+async function prefetchHints(){
+ const run=runId;
+ for(let i=0;i<checkpoints.length;i++){
+  if(run!==runId||!active)return;
+  const cp=checkpoints[i];if(!cp||cp.candidates||cp.done)continue;
+  try{await loadCandidates(i);}catch(e){await sleep(3000);}
+  await sleep(400);
+ }
+}
+function pickHint(cands){
+ if(!cands||!cands.length)return {cat:"none",emoji:"🧭",text:"Het volgende checkpoint ligt in een rustig gebied zonder duidelijk herkenningspunt. Vertrouw op je gevoel!"};
+ let pool=cands.filter(c=>c.cat!==lastHintCat);if(!pool.length)pool=cands;
+ const c=pool[Math.floor(Math.random()*pool.length)],def=CATS[c.cat];
+ const text=(c.name&&Math.random()<0.35)?`Het volgende checkpoint ligt bij een ${c.name}.`:`Het volgende checkpoint ligt ${def.p[Math.floor(Math.random()*def.p.length)]}.`;
+ lastHintCat=c.cat;
+ return {cat:c.cat,emoji:def.e,text};
+}
+function renderHint(h){
+ $("hintRetry").classList.add("hidden");
+ if(h===null){$("hintEmoji").textContent="⏳";$("hintText").textContent="Hint wordt opgehaald…";return;}
+ if(h.error){$("hintEmoji").textContent="📡";$("hintText").textContent="De hint kon niet worden opgehaald (geen verbinding?).";$("hintRetry").classList.remove("hidden");return;}
+ $("hintEmoji").textContent=h.emoji;$("hintText").textContent=h.text;
+}
+async function showNextHint(){
+ const my=++hintToken,nextI=checkpoints.findIndex(c=>!c.done),n=locks.length;
+ $("hintArea").classList.remove("hidden");
+ if(nextI<0){$("hintHead").textContent="ALLE CHECKPOINTS GEHAALD";$("hintSub").textContent="Goed gedaan!";$("hintEmoji").textContent="🏁";$("hintText").textContent="Beëindig de challenge om de route te onthullen.";$("hintRetry").classList.add("hidden");return;}
+ $("hintHead").textContent=n?`CHECKPOINT ${n} GEHAALD`:"START";
+ $("hintSub").textContent=`Op naar checkpoint ${n+1}!`;
+ const cp=checkpoints[nextI];
+ if(cp.hint){renderHint(cp.hint);return;}
+ renderHint(null);
+ try{
+  const cands=await loadCandidates(nextI);if(my!==hintToken)return;
+  cp.hint=pickHint(cands);saveState();renderHint(cp.hint);
+ }catch(e){if(my===hintToken)renderHint({error:true});}
+}
+$("hintRetry").onclick=()=>showNextHint();
 $("cameraToggle").onclick=()=>{
  cameraMode=!cameraMode;$("cameraToggle").textContent="Camera-/makersmodus: "+(cameraMode?"AAN":"UIT");$("cameraInfo").classList.toggle("hidden",!cameraMode);
  const last=locks[locks.length-1];if(last)paintFeedback(last.feedback,last.deviation);saveState();
 };
 $("finishButton").onclick=()=>{if(confirm("Weet je zeker dat je de challenge wilt beëindigen en de route wilt onthullen?"))finishChallenge();};
 function finishChallenge(){
- active=false;finished=true;if(watchId!==null){navigator.geolocation.clearWatch(watchId);watchId=null;}
+ runId++;active=false;finished=true;if(watchId!==null){navigator.geolocation.clearWatch(watchId);watchId=null;}
  const ds=locks.map(x=>x.deviation);
  $("averageDeviation").textContent=ds.length?(ds.reduce((a,b)=>a+b,0)/ds.length).toFixed(0)+" m":"—";
  $("bestDeviation").textContent=ds.length?Math.min(...ds).toFixed(0)+" m":"—";
@@ -272,14 +407,15 @@ $("downloadCsv").onclick=()=>{
  download(importedName+"-resultaten.csv","\uFEFF"+rows.map(r=>r.map(v=>'"'+String(v??"").replace(/"/g,'""')+'"').join(";")).join("\n"),"text/csv;charset=utf-8");
 };
 $("newChallenge").onclick=()=>{
- if(watchId!==null)navigator.geolocation.clearWatch(watchId);watchId=null;active=false;finished=false;route=[];checkpoints=[];locks=[];currentPosition=null;clearSaved();
+ runId++;lastHintCat=null;if(watchId!==null)navigator.geolocation.clearWatch(watchId);watchId=null;active=false;finished=false;route=[];checkpoints=[];locks=[];currentPosition=null;clearSaved();
  $("gpxFile").value="";$("start").value="";$("end").value="";setStatus("Kies een GPX-bestand of vul start- en finishcoördinaten in.");showSection("setup");
 };
 function restoreState(){
  let raw;try{raw=localStorage.getItem(STORAGE_KEY);}catch(e){return;}if(!raw)return;
  try{
-  const s=JSON.parse(raw);if(s.version!==4||!Array.isArray(s.route)||s.route.length<2)return;
-  route=s.route;routeMetrics(route);checkpoints=s.checkpoints||[];locks=s.locks||[];totalMeters=s.totalMeters||totalMeters;
+  const s=JSON.parse(raw);if((s.version!==4&&s.version!==5)||!Array.isArray(s.route)||s.route.length<2)return;
+  route=s.route;routeMetrics(route);checkpoints=s.checkpoints||[];locks=s.locks||[];lastHintCat=s.lastHintCat||null;
+  if(s.version===4){checkpoints.forEach((c,i)=>{c.done=i<locks.length;});locks.forEach((l,i)=>{l.cpIndex=i;});}totalMeters=s.totalMeters||totalMeters;
   importedName=s.importedName||"checkpoint-route";$("activity").value=s.activity||"cycling";$("interval").value=s.interval||"10";
   $("routeKm").textContent=(totalMeters/1000).toFixed(1)+" km";$("checkpointCount").textContent=String(checkpoints.length);cameraMode=!!s.cameraMode;
   if(s.finished){finished=true;active=false;finishChallenge();return;}
