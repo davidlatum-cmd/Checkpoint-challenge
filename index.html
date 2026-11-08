@@ -57,6 +57,8 @@ footer{font-size:12px;color:var(--muted);text-align:center;margin-top:20px}
       <div class="metric"><strong id="checkpointCount">—</strong><span>Checkpoints</span></div>
     </div>
     <p class="small">De route en checkpointlocaties zijn verborgen. Geef de browser toegang tot je locatie voordat je begint.</p>
+    <div id="hintPrep" class="status" style="margin-top:10px"></div>
+    <button class="secondary" id="prepHints">Bereken hints</button>
     <button id="startChallenge">Start challenge</button>
     <button class="secondary" id="backSetup">Andere route kiezen</button>
   </section>
@@ -120,7 +122,7 @@ let route=[], cumulative=[], totalMeters=0, checkpoints=[], locks=[], lastHintCa
 const hintPromises={};const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 let currentPosition=null, watchId=null, active=false, finished=false, cameraMode=false, importedName="checkpoint-route";
 const sections=["setup","ready","active","finished"];
-function showSection(id){sections.forEach(s=>$(s).classList.toggle("hidden",s!==id));}
+function showSection(id){sections.forEach(s=>$(s).classList.toggle("hidden",s!==id));if(id==="ready")updatePrep();}
 function setStatus(message,kind=""){const el=$("setupStatus");el.textContent=message;el.className="status"+(kind?" "+kind:"");}
 function saveState(){
  const state={version:5,lastHintCat,route,cumulative,totalMeters,checkpoints,locks,activity:$("activity").value,interval:$("interval").value,active,finished,cameraMode,importedName};
@@ -233,7 +235,33 @@ function beginActive(){
  updateProgress();if(locks.length){const last=locks[locks.length-1];paintFeedback(last.feedback,last.deviation);}else $("feedbackArea").classList.add("hidden");
  $("lockButton").disabled=true;showSection("active");startGps();runId++;showNextHint();prefetchHints();saveState();
 }
-$("startChallenge").onclick=()=>{if(!checkpoints.length){alert("Er zijn geen checkpoints.");return;}locks=[];lastHintCat=null;checkpoints.forEach(c=>{c.done=false;delete c.hint;});cameraMode=false;beginActive();};
+function setPrep(msg,kind=""){const el=$("hintPrep");el.textContent=msg;el.className="status"+(kind?" "+kind:"");el.style.marginTop="10px";}
+function updatePrep(){
+ const total=checkpoints.length,n=checkpoints.filter(c=>c.candidates).length;if(!total)return;
+ if(n===total){setPrep(`Alle hints zijn klaar (${n} van ${total}). Je kunt starten, ook zonder bereik.`,"good");$("prepHints").textContent="Hints opnieuw berekenen";}
+ else if(n>0){setPrep(`${n} van ${total} hints berekend. Bereken de rest voordat je vertrekt.`);$("prepHints").textContent="Bereken ontbrekende hints";}
+ else{setPrep("Hints zijn nog niet berekend. Doe dit thuis met een goede verbinding, dan heb je onderweg geen internet nodig.");$("prepHints").textContent="Bereken hints";}
+}
+let prepRun=0;
+$("prepHints").onclick=async()=>{
+ const my=++prepRun,total=checkpoints.length;let fail=0,lastMsg="";
+ const redo=checkpoints.every(c=>c.candidates);if(redo)checkpoints.forEach(c=>{delete c.candidates;});
+ $("prepHints").disabled=true;$("startChallenge").disabled=true;$("backSetup").disabled=true;
+ for(let i=0;i<total;i++){
+  if(my!==prepRun)return;
+  if(checkpoints[i].candidates)continue;
+  setPrep(`Hints berekenen… ${i+1} van ${total}${fail?` (${fail} mislukt)`:""}`);
+  try{await loadCandidates(i);}catch(e){fail++;lastMsg=e.message;await sleep(1500);}
+  await sleep(300);
+ }
+ $("prepHints").disabled=false;$("startChallenge").disabled=false;$("backSetup").disabled=false;
+ if(fail){updatePrep();setPrep(`${fail} van ${total} hints mislukt: ${lastMsg}. Tik nogmaals op de knop om de rest te proberen.`,"error");}
+ else updatePrep();
+ saveState();
+};
+$("startChallenge").onclick=()=>{if(!checkpoints.length){alert("Er zijn geen checkpoints.");return;}
+ if(checkpoints.some(c=>!c.candidates)&&!confirm("Niet alle hints zijn vooraf berekend. Onderweg heb je dan internet nodig om ze op te halen. Toch starten?"))return;
+locks=[];lastHintCat=null;checkpoints.forEach(c=>{c.done=false;delete c.hint;});cameraMode=false;beginActive();};
 $("lockButton").onclick=()=>{
  if(!active||!currentPosition)return;
  let best=-1,bd=Infinity;
@@ -244,7 +272,7 @@ $("lockButton").onclick=()=>{
  paintFeedback(label,bd);updateProgress();showNextHint();saveState();
 };
 /* ---- Hints via OpenStreetMap (Overpass) ---- */
-const ENDPOINTS=["https://overpass-api.de/api/interpreter","https://overpass.kumi.systems/api/interpreter","https://overpass.private.coffee/api/interpreter"];
+const ENDPOINTS=["https://overpass-api.de/api/interpreter","https://lz4.overpass-api.de/api/interpreter","https://z.overpass-api.de/api/interpreter","https://overpass.private.coffee/api/interpreter","https://overpass.kumi.systems/api/interpreter","https://overpass.openstreetmap.fr/api/interpreter"];
 const CATS={
  supermarket:{e:"🛒",p:["in de buurt van een supermarkt","bij een supermarkt"]},
  church:{e:"⛪",p:["in de buurt van een kerk","bij een kerk"]},
@@ -283,7 +311,7 @@ const RULES=[
 ];
 function overpassQuery(p){
  const a=(r)=>`(around:${r},${p.lat},${p.lon})`;
- return `[out:json][timeout:10];(
+ return `[out:json][timeout:15];(
 nwr${a(150)}["shop"="supermarket"];
 nwr${a(150)}["amenity"="place_of_worship"];
 way${a(80)}["bridge"~"^(yes|viaduct|movable|boardwalk|aqueduct)$"];
@@ -310,7 +338,7 @@ function extractCandidates(elements){
 async function fetchCandidates(p){
  const body="data="+encodeURIComponent(overpassQuery(p));
  const one=async url=>{
-  const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),12000);
+  const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),15000);
   try{
    const r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body,signal:ctl.signal});
    if(!r.ok)throw new Error("HTTP "+r.status);
@@ -320,8 +348,12 @@ async function fetchCandidates(p){
   }catch(e){throw new Error((e.name==="AbortError"?"time-out":e.message)+" ("+new URL(url).hostname+")");}
   finally{clearTimeout(timer);}
  };
- try{return await Promise.any(ENDPOINTS.map(one));}
- catch(e){throw new Error(e.errors?e.errors.map(x=>x.message).join("; "):e.message);}
+ const hosts=[...ENDPOINTS].sort(()=>Math.random()-.5),errs=[];
+ for(const group of [hosts.slice(0,3),hosts.slice(3)]){
+  try{return await Promise.any(group.map(one));}
+  catch(e){(e.errors||[e]).forEach(x=>errs.push(x.message));}
+ }
+ throw new Error(errs.slice(-3).join("; "));
 }
 function loadCandidates(i){
  const cp=checkpoints[i];
